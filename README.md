@@ -28,7 +28,7 @@ print(resp.response)
 # List of all messages
 print(resp.responses)
 # Various status bits, headers, trailers
-print(resp.grpc_status, resp.grpc_headers, resp.http_headers, resp.http_status)
+print(resp.grpc_status, resp.headers, resp.http_status)
 await session.close()
 ```
 
@@ -40,7 +40,7 @@ async for msg in messages:
     print("Got a message:", msg)
 
 # You need to iterate through all messages before reading the status bits.
-print(resp.grpc_status, resp.grpc_headers, resp.http_headers, resp.http_status)
+print(resp.grpc_status, resp.headers, resp.http_status)
 ```
 
 You can also pass in an iterator as a payload to stream request messages

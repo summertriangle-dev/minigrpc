@@ -120,47 +120,33 @@ DEFAULT_PORT = 443
 class gRPCResponse(object):
     def __init__(self, http_status: int, http_headers: Headers, save_msgs: bool):
         self.http_status = http_status
-        self.http_headers = self.header_list_to_dict(http_headers)
-        self._trailers: Optional[Dict[str, Union[str, bytes]]] = None
+        self.headers = self.header_list_to_dict(http_headers)
+        self._final = False
         self._responses: Optional[List[bytes]] = [] if save_msgs else None
 
     @staticmethod
     def header_list_to_dict(
         headers: Headers, is_grpc=False
     ) -> Dict[str, Union[str, bytes]]:
-        headers_ret: Dict[str, Union[str, bytes]]
-        if is_grpc:
-            headers_ret = {}
-            for (name, value) in headers:
-                key = name.decode("ascii")
-                if key.endswith("-bin"):
-                    headers_ret[key[:-4]] = base64.b64decode(value)
-                else:
-                    headers_ret[key] = value.decode("ascii")
-        else:
-            headers_ret = {
-                name.decode("ascii"): value.decode("utf8") for name, value in headers
-            }
+        headers_ret: Dict[str, Union[str, bytes]] = {}
+
+        for (name, value) in headers:
+            key = name.decode("ascii")
+            if key.endswith("-bin"):
+                headers_ret[key[:-4]] = base64.b64decode(value + b"====")
+            else:
+                headers_ret[key] = value.decode("ascii")
 
         return headers_ret
 
     @property
-    def grpc_headers(self) -> Dict[str, Union[str, bytes]]:
-        if self._trailers is None:
-            raise ValueError(
-                "gRPC headers are not available until you exhaust the response iterator."
-            )
-
-        return self._trailers
-
-    @property
     def grpc_status(self) -> int:
-        if self._trailers is None:
+        if not self._final:
             raise ValueError(
                 "Status is not available until you exhaust the response iterator."
             )
 
-        return int(self._trailers["grpc-status"])
+        return int(self.headers["grpc-status"])
 
     @property
     def responses(self) -> Sequence[bytes]:
@@ -179,7 +165,10 @@ class gRPCResponse(object):
             self._responses.append(msg)
 
     def _make_trailers_available(self, trailers: Headers):
-        self._trailers = self.header_list_to_dict(trailers, is_grpc=True)
+        self.headers.update(self.header_list_to_dict(trailers, is_grpc=True))
+
+    def _finalize(self):
+        self._final = True
 
     async def _body_iterator(
         self, stream: AsyncHTTP2Stream, timeout: TimeoutDict
@@ -211,7 +200,9 @@ class gRPCResponse(object):
                     len(buf) == 0
                 ), "BUG in minigrpc: there is response data remaining in buffer"
                 self._make_trailers_available(event.headers)
+                self._finalize()
             elif isinstance(event, (h2.events.StreamEnded, h2.events.StreamReset)):
+                self._finalize()
                 break
 
 
@@ -233,6 +224,12 @@ class gRPCSession(object):
         )
         self.connection.ssl_context.set_alpn_protocols(["h2"])
 
+    async def __aenter__(self):
+        pass
+
+    async def __aexit__(self):
+        await self.close()
+
     def build_headers(self, headers):
         base_headers = [
             (b"te", b"trailers"),
@@ -244,7 +241,7 @@ class gRPCSession(object):
         for k, v in headers.items():
             if isinstance(v, bytes):
                 base_headers.append(
-                    (f"{k.lower()}-bin".encode("utf8"), base64.b64encode(v))
+                    (f"{k.lower()}-bin".encode("utf8"), base64.b64encode(v).strip(b"="))
                 )
             else:
                 base_headers.append((k.lower().encode("ascii"), v.encode("ascii")))
